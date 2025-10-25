@@ -20,12 +20,10 @@
 
 <script>
 /*
-  Pixel Worlds-like platformer demo in a single HTML file.
-  - Single canvas game (no assets)
-  - Tile-based terrain so you clearly see movement
-  - Movement + jump physics with coyote time and jump buffering
-  - Camera follows player
-  - Easy to host: save as index.html and push to GitHub Pages
+  Pixel Worlds-like platformer demo (updated):
+  - Smooth zooming (mouse wheel) similar to Pixel Worlds (interpolated)
+  - Less slippery "walking" movement: ground acceleration moves player quickly to target speed
+  - All other features preserved (tiles, camera, coyote time, jump buffer)
 */
 
 (() => {
@@ -35,7 +33,6 @@
 
   // --- Display & scaling ---
   function resize(){
-    // keep crisp pixel look by using integer scale of base resolution
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
   }
@@ -43,86 +40,58 @@
   resize();
 
   // --- World constants ---
-  const TILE = 32;               // tile size in pixels
-  const WORLD_W = 300;          // number of horizontal tiles
-  const WORLD_H = 40;           // number of vertical tiles
+  const TILE = 32;
+  const WORLD_W = 300;
+  const WORLD_H = 40;
 
-  // --- Generate terrain (1D height with smoothing + platforms) ---
-  const tiles = new Uint8Array(WORLD_W * WORLD_H); // 0 empty, 1 dirt
-
-  // produce a smooth terrain height map
+  // --- Tiles ---
+  const tiles = new Uint8Array(WORLD_W * WORLD_H);
   function makeHeightMap(w){
     const h = new Array(w);
-    // coarse random seeds
     const seeds = 8;
     const seedVals = [];
     for(let i=0;i<seeds;i++) seedVals.push(Math.random()*6 - 3);
     for(let x=0;x<w;x++){
-      // combine some sine waves + random seeds interpolation
       let v = 0;
       v += Math.sin(x*0.02) * 3.5;
       v += Math.sin(x*0.005)*8.0;
       v += Math.sin(x*0.11)*1.5;
-      // low-frequency seeded bumps
       const t = (x/w)*(seeds-1);
       const i0 = Math.floor(t), f = t - i0;
       const a = seedVals[i0 % seeds];
       const b = seedVals[(i0+1) % seeds];
       v += (a*(1-f) + b*f) * 3.0;
-      // baseline ground mid-height
       h[x] = Math.floor(WORLD_H*0.5 + v);
-      // clamp
       if(h[x] > WORLD_H-2) h[x] = WORLD_H-2;
       if(h[x] < 6) h[x] = 6;
     }
     return h;
   }
-
   const heightMap = makeHeightMap(WORLD_W);
-
-  // fill tiles below height
   for(let x=0;x<WORLD_W;x++){
     const ground = heightMap[x];
-    for(let y=ground; y<WORLD_H; y++){
-      tiles[y*WORLD_W + x] = 1;
-    }
+    for(let y=ground; y<WORLD_H; y++) tiles[y*WORLD_W + x] = 1;
   }
-
-  // add some floating platforms
   for(let i=0;i<60;i++){
     const px = Math.floor(Math.random() * (WORLD_W-8));
     const py = Math.floor(Math.random() * (WORLD_H/2)) + 6;
     const len = Math.floor(Math.random()*5) + 2;
-    for(let x=px; x<px+len; x++){
-      tiles[py*WORLD_W + x] = 1;
-    }
+    for(let x=px; x<px+len; x++) tiles[py*WORLD_W + x] = 1;
   }
 
   // --- Player ---
-  const player = {
-    x: TILE*5 + TILE/2, // center
-    y: (heightMap[5] - 2)*TILE,
-    w: 22,
-    h: 28,
-    vx: 0,
-    vy: 0,
-    onGround: false,
-    facing: 1,
-  };
+  const player = { x: TILE*5 + TILE/2, y: (heightMap[5] - 2)*TILE, w:22, h:28, vx:0, vy:0, onGround:false, facing:1 };
 
-  // --- Physics params (tune for "Pixel Worlds" feel) ---
-  const GRAVITY = 1400;         // pixels / s^2
-  const MAX_FALL = 1400;
-  const MOVE_ACC = 6000;        // acceleration
-  const MAX_SPEED = 300;        // horizontal max speed
-  const FRICTION = 0.85;        // per second friction applied when no input
-  const JUMP_SPEED = 520;       // initial jump velocity
-  const JUMP_CUTOFF = 200;      // when releasing jump while rising, cap upward speed
-  const COYOTE_TIME = 0.10;     // seconds after leaving ground where jump still works
-  const JUMP_BUFFER = 0.10;     // seconds before landing when press jump will trigger
+  // --- Physics params ---
+  const GRAVITY = 1400; const MAX_FALL = 1400;
+  // movement tuned for walking feel
+  const MAX_SPEED = 220;        // slightly lower top speed for walking
+  const GROUND_ACCEL = 14000;   // fast ground acceleration -> quick start/stop
+  const AIR_ACCEL = 3200;       // lower air control
+  const JUMP_SPEED = 520; const JUMP_CUTOFF = 200;
+  const COYOTE_TIME = 0.10; const JUMP_BUFFER = 0.10;
 
-  let coyoteTimer = 0;
-  let jumpBufferTimer = 0;
+  let coyoteTimer = 0; let jumpBufferTimer = 0;
 
   // --- Input ---
   const input = {left:false,right:false,jump:false,jumpHeld:false};
@@ -137,229 +106,164 @@
     if(e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space'){ input.jumpHeld = false; input.jump = false; }
   });
 
-  // --- Utilities for tile collisions ---
-  function tileAt(tx, ty){
-    if(tx < 0 || tx >= WORLD_W || ty < 0 || ty >= WORLD_H) return 1; // treat outside as solid
-    return tiles[ty*WORLD_W + tx];
-  }
-
+  // --- Tile helpers ---
+  function tileAt(tx, ty){ if(tx < 0 || tx >= WORLD_W || ty < 0 || ty >= WORLD_H) return 1; return tiles[ty*WORLD_W + tx]; }
   function worldToTile(px){ return Math.floor(px / TILE); }
 
-  // resolve axis-aligned collisions: move player and slide
-  function resolveCollision(px, py, w, h, vx, vy){
+  // --- Collision resolver (unchanged) ---
+  function resolveCollision(px, py, w, h, vx, vy, dt){
     let nx = px, ny = py, nvx = vx, nvy = vy;
-
-    // horizontal collision
     nx += nvx * dt;
     let left = worldToTile(nx - w/2);
     let right = worldToTile(nx + w/2 - 0.0001);
     let top = worldToTile(ny - h/2);
     let bottom = worldToTile(ny + h/2 - 0.0001);
-
-    // check each row intersected
     for(let ty = top; ty <= bottom; ty++){
       if(tileAt(left, ty)){
-        // collided with left column
-        nx = (left+1)*TILE + w/2 + 0.001;
-        nvx = 0;
-        left = worldToTile(nx - w/2);
+        nx = (left+1)*TILE + w/2 + 0.001; nvx = 0; left = worldToTile(nx - w/2);
       }
       if(tileAt(right, ty)){
-        nx = (right)*TILE - w/2 - 0.001;
-        nvx = 0;
-        right = worldToTile(nx + w/2 - 0.0001);
+        nx = (right)*TILE - w/2 - 0.001; nvx = 0; right = worldToTile(nx + w/2 - 0.0001);
       }
     }
-
-    // vertical collision (use ny computed with vertical movement)
     ny += nvy * dt;
-    left = worldToTile(nx - w/2);
-    right = worldToTile(nx + w/2 - 0.0001);
-    top = worldToTile(ny - h/2);
-    bottom = worldToTile(ny + h/2 - 0.0001);
-
+    left = worldToTile(nx - w/2); right = worldToTile(nx + w/2 - 0.0001);
+    top = worldToTile(ny - h/2); bottom = worldToTile(ny + h/2 - 0.0001);
     let onGround = false;
     for(let tx = left; tx <= right; tx++){
       if(tileAt(tx, top)){
-        ny = (top+1)*TILE + h/2 + 0.001;
-        nvy = 0;
-        top = worldToTile(ny - h/2);
+        ny = (top+1)*TILE + h/2 + 0.001; nvy = 0; top = worldToTile(ny - h/2);
       }
       if(tileAt(tx, bottom)){
-        ny = (bottom)*TILE - h/2 - 0.001;
-        nvy = 0;
-        bottom = worldToTile(ny + h/2 - 0.0001);
-        onGround = true;
+        ny = (bottom)*TILE - h/2 - 0.001; nvy = 0; bottom = worldToTile(ny + h/2 - 0.0001); onGround = true;
       }
     }
     return {x:nx,y:ny,vx:nvx,vy:nvy,onGround};
   }
 
-  // --- Camera ---
-  const camera = {x:0,y:0};
+  // --- Camera & Zoom ---
+  const camera = { x:0, y:0, scale:1, targetScale:1 };
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
   function updateCamera(){
-    const marginX = canvas.width * 0.3;
-    const marginY = canvas.height * 0.2;
-    const targetX = player.x - canvas.width/2;
-    const targetY = player.y - canvas.height/2;
-    // smooth camera
+    // camera target centers player, accounting for current scale
+    const targetX = player.x - (canvas.width / (2 * camera.scale));
+    const targetY = player.y - (canvas.height / (2 * camera.scale));
     camera.x += (targetX - camera.x) * 0.12;
     camera.y += (targetY - camera.y) * 0.12;
-    // clamp to world
-    camera.x = Math.max(0, Math.min(camera.x, WORLD_W*TILE - canvas.width));
-    camera.y = Math.max(0, Math.min(camera.y, WORLD_H*TILE - canvas.height));
+    camera.scale += (camera.targetScale - camera.scale) * 0.12;
+    camera.x = clamp(camera.x, 0, WORLD_W * TILE - canvas.width / camera.scale);
+    camera.y = clamp(camera.y, 0, WORLD_H * TILE - canvas.height / camera.scale);
   }
 
-  // --- Game loop & fixed timestep ---
-  let last = performance.now();
-  let acc = 0;
-  const STEP = 1/60;
-  let frames = 0, fps=0, fpsTimer=0;
-  window.dt = STEP; // expose for resolveCollision
+  // wheel zoom
+  window.addEventListener('wheel', (e) => {
+    // zoom towards pointer position
+    const prev = camera.targetScale;
+    const zoomFactor = Math.pow(1.0015, -e.deltaY);
+    camera.targetScale = clamp(camera.targetScale * zoomFactor, 0.6, 3.0);
+
+    // optional: keep the world point under cursor stable while changing targetScale
+    // compute world coords under pointer before and after adjusting targetScale
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const worldBeforeX = camera.x + sx / prev;
+    const worldBeforeY = camera.y + sy / prev;
+    const worldAfterX = camera.x + sx / camera.targetScale;
+    const worldAfterY = camera.y + sy / camera.targetScale;
+    // shift camera to keep the same world point under the cursor (immediate compensation)
+    camera.x += (worldAfterX - worldBeforeX);
+    camera.y += (worldAfterY - worldBeforeY);
+  }, {passive:true});
+
+  // double-click to reset zoom
+  canvas.addEventListener('dblclick', () => { camera.targetScale = 1.0; });
+
+  // --- Helpers ---
+  function moveToward(v, target, maxDelta){
+    if(v < target) return Math.min(v + maxDelta, target);
+    if(v > target) return Math.max(v - maxDelta, target);
+    return v;
+  }
+
+  // --- Game loop & physics ---
+  let last = performance.now(); let acc = 0; const STEP = 1/60; window.dt = STEP;
+  let frames = 0, fps = 0, fpsTimer = 0;
 
   function physicsStep(){
-    // horizontal input
-    let ax = 0;
-    if(input.left) ax -= MOVE_ACC;
-    if(input.right) ax += MOVE_ACC;
-
-    // integrate vx
-    player.vx += ax * STEP;
-    // apply friction when no input
-    if(!input.left && !input.right){
-      player.vx *= Math.pow(FRICTION, STEP*60);
-    }
-    // clamp speed
-    if(player.vx > MAX_SPEED) player.vx = MAX_SPEED;
-    if(player.vx < -MAX_SPEED) player.vx = -MAX_SPEED;
+    // determine horizontal target speed
+    let target = 0;
+    if(input.left) target -= MAX_SPEED;
+    if(input.right) target += MAX_SPEED;
+    // choose accel based on ground/air
+    const accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL;
+    player.vx = moveToward(player.vx, target, accel * STEP);
 
     // gravity
     player.vy += GRAVITY * STEP;
     if(player.vy > MAX_FALL) player.vy = MAX_FALL;
 
     // timers
-    coyoteTimer -= STEP;
-    if(player.onGround) coyoteTimer = COYOTE_TIME;
-    if(jumpBufferTimer > 0) jumpBufferTimer -= STEP;
+    coyoteTimer -= STEP; if(player.onGround) coyoteTimer = COYOTE_TIME; if(jumpBufferTimer > 0) jumpBufferTimer -= STEP;
 
-    // jumping logic with coyote and buffer
-    if(jumpBufferTimer > 0 && coyoteTimer > 0){
-      // do jump
-      player.vy = -JUMP_SPEED;
-      player.onGround = false;
-      coyoteTimer = 0;
-      jumpBufferTimer = 0;
-    }
+    // jump logic
+    if(jumpBufferTimer > 0 && coyoteTimer > 0){ player.vy = -JUMP_SPEED; player.onGround = false; coyoteTimer = 0; jumpBufferTimer = 0; }
+    if(!input.jumpHeld && player.vy < 0){ if(player.vy < -JUMP_CUTOFF) player.vy = -JUMP_CUTOFF; }
 
-    // variable jump (higher when holding)
-    if(!input.jumpHeld && player.vy < 0){
-      // cut upward speed if player releases jump
-      if(player.vy < -JUMP_CUTOFF) player.vy = -JUMP_CUTOFF;
-    }
-
-    // collision and movement
-    const res = resolveCollision(player.x, player.y, player.w, player.h, player.vx, player.vy);
+    // collision (use dt)
+    const res = resolveCollision(player.x, player.y, player.w, player.h, player.vx, player.vy, STEP);
     player.x = res.x; player.y = res.y; player.vx = res.vx; player.vy = res.vy; player.onGround = res.onGround;
 
-    // face direction
-    if(player.vx < -1) player.facing = -1;
-    if(player.vx > 1) player.facing = 1;
+    if(player.vx < -1) player.facing = -1; if(player.vx > 1) player.facing = 1;
   }
 
   function draw(){
-    // pixel-perfect rendering: integer translate
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.save(); ctx.imageSmoothingEnabled = false; ctx.clearRect(0,0,canvas.width,canvas.height);
 
-    // camera translation
+    // transform: scale world then translate by camera in world units
+    ctx.scale(camera.scale, camera.scale);
     ctx.translate(-Math.floor(camera.x), -Math.floor(camera.y));
 
-    // draw tiles in view
-    const startX = Math.floor(camera.x / TILE) - 1;
-    const endX = Math.ceil((camera.x + canvas.width) / TILE) + 1;
-    const startY = Math.floor(camera.y / TILE) - 1;
-    const endY = Math.ceil((camera.y + canvas.height) / TILE) + 1;
+    // visible tiles based on scaled viewport
+    const viewW = canvas.width / camera.scale; const viewH = canvas.height / camera.scale;
+    const startX = Math.floor(camera.x / TILE) - 1; const endX = Math.ceil((camera.x + viewW) / TILE) + 1;
+    const startY = Math.floor(camera.y / TILE) - 1; const endY = Math.ceil((camera.y + viewH) / TILE) + 1;
 
     for(let tx = startX; tx <= endX; tx++){
       for(let ty = startY; ty <= endY; ty++){
         if(tx<0||tx>=WORLD_W||ty<0||ty>=WORLD_H) continue;
-        const t = tileAt(tx,ty);
-        if(!t) continue;
-        // top-of-ground detection for grass
-        let isTop = false;
-        if(!tileAt(tx, ty-1)) isTop = true;
-        const px = tx * TILE;
-        const py = ty * TILE;
-        // draw dirt
-        ctx.fillStyle = '#6B3E1E';
-        ctx.fillRect(px, py, TILE, TILE);
-        // top grass
-        if(isTop){
-          ctx.fillStyle = '#2CA02C';
-          ctx.fillRect(px, py, TILE, Math.floor(TILE*0.28));
-        }
-        // add a darker border to look tile-y
-        ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-        ctx.strokeRect(px+0.5, py+0.5, TILE-1, TILE-1);
+        const t = tileAt(tx,ty); if(!t) continue;
+        let isTop = false; if(!tileAt(tx, ty-1)) isTop = true;
+        const px = tx * TILE; const py = ty * TILE;
+        ctx.fillStyle = '#6B3E1E'; ctx.fillRect(px, py, TILE, TILE);
+        if(isTop){ ctx.fillStyle = '#2CA02C'; ctx.fillRect(px, py, TILE, Math.floor(TILE*0.28)); }
+        ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.strokeRect(px+0.5, py+0.5, TILE-1, TILE-1);
       }
     }
 
-    // draw player (simple pixel-style rectangle with a small eye)
-    const px = Math.floor(player.x - player.w/2);
-    const py = Math.floor(player.y - player.h/2);
-    ctx.fillStyle = '#fefefe';
-    ctx.fillRect(px, py, player.w, player.h);
-    // shirt
-    ctx.fillStyle = '#0066cc';
-    ctx.fillRect(px+3, py+8, player.w-6, player.h-10);
-    // eye
-    ctx.fillStyle = '#000';
-    ctx.fillRect(px + (player.facing===1 ? player.w-7 : 4), py+8, 3, 3);
-
-    // debug: border around player
-    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-    ctx.strokeRect(px, py, player.w, player.h);
+    // draw player
+    const px = Math.floor(player.x - player.w/2); const py = Math.floor(player.y - player.h/2);
+    ctx.fillStyle = '#fefefe'; ctx.fillRect(px, py, player.w, player.h);
+    ctx.fillStyle = '#0066cc'; ctx.fillRect(px+3, py+8, player.w-6, player.h-10);
+    ctx.fillStyle = '#000'; ctx.fillRect(px + (player.facing===1 ? player.w-7 : 4), py+8, 3, 3);
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.strokeRect(px, py, player.w, player.h);
 
     ctx.restore();
 
-    // HUD text
-    hud.innerHTML = `x:${Math.round(player.x)} y:${Math.round(player.y)} vx:${Math.round(player.vx)} vy:${Math.round(player.vy)} fps:${Math.round(fps)}`;
+    hud.innerHTML = `x:${Math.round(player.x)} y:${Math.round(player.y)} vx:${Math.round(player.vx)} vy:${Math.round(player.vy)} fps:${Math.round(fps)} zoom:${camera.scale.toFixed(2)}`;
   }
 
-  // --- Game loop ---
   function frame(now){
-    const dt_real = (now - last) / 1000;
-    last = now;
-    acc += dt_real;
-    // cap accumulator to avoid spiral of death
-    if(acc > 0.25) acc = 0.25;
-    while(acc >= STEP){
-      physicsStep();
-      acc -= STEP;
-    }
-    updateCamera();
-    draw();
-
-    // FPS
-    frames++; fpsTimer += dt_real;
-    if(fpsTimer >= 0.5){ fps = frames / fpsTimer; frames = 0; fpsTimer = 0; }
-
+    const dt_real = (now - last) / 1000; last = now; acc += dt_real; if(acc > 0.25) acc = 0.25;
+    while(acc >= STEP){ physicsStep(); acc -= STEP; }
+    updateCamera(); draw(); frames++; fpsTimer += dt_real; if(fpsTimer >= 0.5){ fps = frames / fpsTimer; frames = 0; fpsTimer = 0; }
     requestAnimationFrame(frame);
   }
 
-  // initialize
-  last = performance.now();
-  requestAnimationFrame(frame);
+  last = performance.now(); requestAnimationFrame(frame);
 
-  // Useful functions for hosting / controls
-  // Allow click to focus and use keyboard immediately
-  canvas.tabIndex = 1000;
-  canvas.style.outline = 'none';
-  canvas.addEventListener('click', () => canvas.focus());
-
-  // small helpful note placed in HUD
-  hud.innerHTML = 'Ready — Click canvas to focus. Controls: ←/A, →/D, Space to jump';
+  // focus canvas on click
+  canvas.tabIndex = 1000; canvas.style.outline = 'none'; canvas.addEventListener('click', () => canvas.focus());
+  hud.innerHTML = 'Ready — Click canvas to focus. Controls: ←/A, →/D, Space to jump, wheel to zoom';
 
 })();
 </script>
