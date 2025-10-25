@@ -20,17 +20,37 @@
 
 <script>
 /*
-  Pixel Worlds-like platformer demo (updated with pixel-perfect zoom snapping and foot particles)
-  - Wheel zoom snaps to visual pixel scales (0.5, 1, 2, 3, 4) after user stops scrolling
-  - Camera keeps the world point under cursor during zoom
-  - Particle effect at player's feet while walking on terrain
-  - Movement still uses tight walking acceleration
+  Pixel Worlds-like platformer demo (updated)
+  - Pretty loading screen with progress bar while terrain is generated
+  - Dynamic 2.5D sky: gradient changes with player X, sun arcs left->right, parallax clouds
+  - Preserves pixel-scale zoom snapping, walking, and foot particles
 */
 
 (() => {
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   const hud = document.getElementById('hud');
+
+  // create a loading overlay DOM element dynamically
+  const loading = document.createElement('div');
+  loading.id = 'loadingOverlay';
+  Object.assign(loading.style, {
+    position: 'fixed', left: 0, top: 0, right: 0, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'linear-gradient(180deg, rgba(7,14,26,0.95), rgba(10,18,34,0.92))', color: '#fff', zIndex: 9999, flexDirection: 'column'
+  });
+  loading.innerHTML = `
+    <div style="text-align:center; max-width:520px; padding:22px; border-radius:10px; backdrop-filter: blur(4px);">
+      <div style="font-size:28px; font-weight:700; margin-bottom:8px">Pixel Worlds — Loading</div>
+      <div style="font-size:13px; opacity:0.9; margin-bottom:16px">Preparing world, generating terrain and effects…</div>
+      <div id="loaderBar" style="width:100%; height:14px; background:rgba(255,255,255,0.08); border-radius:8px; overflow:hidden;">
+        <div id="loaderFill" style="height:100%; width:0%; background:linear-gradient(90deg,#ffd36b,#ffae6b);"></div>
+      </div>
+      <div id="loaderText" style="margin-top:10px; font-size:12px; opacity:0.9">0%</div>
+    </div>
+  `;
+  document.body.appendChild(loading);
+  const loaderFill = loading.querySelector('#loaderFill');
+  const loaderText = loading.querySelector('#loaderText');
 
   // --- Display & scaling ---
   function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
@@ -39,26 +59,60 @@
   // --- World constants ---
   const TILE = 32; const WORLD_W = 300; const WORLD_H = 40;
 
-  // --- Tiles ---
+  // --- Tiles (init empty, will generate progressively) ---
   const tiles = new Uint8Array(WORLD_W * WORLD_H);
-  function makeHeightMap(w){
-    const h = new Array(w); const seeds = 8; const seedVals = [];
+  let heightMap = new Array(WORLD_W);
+
+  // progressive terrain generation so we can show loading progress
+  async function generateTerrain(){
+    // generate seed values
+    const seeds = 8; const seedVals = [];
     for(let i=0;i<seeds;i++) seedVals.push(Math.random()*6 - 3);
-    for(let x=0;x<w;x++){
-      let v = 0; v += Math.sin(x*0.02) * 3.5; v += Math.sin(x*0.005)*8.0; v += Math.sin(x*0.11)*1.5;
-      const t = (x/w)*(seeds-1); const i0 = Math.floor(t), f = t - i0;
-      const a = seedVals[i0 % seeds]; const b = seedVals[(i0+1) % seeds]; v += (a*(1-f) + b*f) * 3.0;
-      h[x] = Math.floor(WORLD_H*0.5 + v);
-      if(h[x] > WORLD_H-2) h[x] = WORLD_H-2; if(h[x] < 6) h[x] = 6;
+
+    for(let x=0;x<WORLD_W;x++){
+      // compute height
+      let v = 0;
+      v += Math.sin(x*0.02) * 3.5;
+      v += Math.sin(x*0.005)*8.0;
+      v += Math.sin(x*0.11)*1.5;
+      const t = (x/WORLD_W)*(seeds-1);
+      const i0 = Math.floor(t), f = t - i0;
+      const a = seedVals[i0 % seeds]; const b = seedVals[(i0+1) % seeds];
+      v += (a*(1-f) + b*f) * 3.0;
+      let h = Math.floor(WORLD_H*0.5 + v);
+      if(h > WORLD_H-2) h = WORLD_H-2;
+      if(h < 6) h = 6;
+      heightMap[x] = h;
+      // fill column
+      for(let y=h; y<WORLD_H; y++) tiles[y*WORLD_W + x] = 1;
+
+      // occasionally add a small delay so browser can paint progress
+      if(x % 6 === 0){
+        const pct = Math.round((x / (WORLD_W-1)) * 100);
+        loaderFill.style.width = pct + '%'; loaderText.textContent = pct + '%';
+        // yield to event loop briefly
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
-    return h;
+
+    // floating platforms
+    for(let i=0;i<60;i++){
+      const px = Math.floor(Math.random() * (WORLD_W-8));
+      const py = Math.floor(Math.random() * (WORLD_H/2)) + 6;
+      const len = Math.floor(Math.random()*5) + 2;
+      for(let x=px; x<px+len; x++) tiles[py*WORLD_W + x] = 1;
+    }
+
+    // finish loader
+    loaderFill.style.width = '100%'; loaderText.textContent = '100%';
+    // short fade out
+    loading.style.transition = 'opacity 420ms ease'; loading.style.opacity = '0';
+    await new Promise(r => setTimeout(r, 450));
+    loading.remove();
   }
-  const heightMap = makeHeightMap(WORLD_W);
-  for(let x=0;x<WORLD_W;x++){ const ground = heightMap[x]; for(let y=ground; y<WORLD_H; y++) tiles[y*WORLD_W + x] = 1; }
-  for(let i=0;i<60;i++){ const px = Math.floor(Math.random() * (WORLD_W-8)); const py = Math.floor(Math.random() * (WORLD_H/2)) + 6; const len = Math.floor(Math.random()*5) + 2; for(let x=px; x<px+len; x++) tiles[py*WORLD_W + x] = 1; }
 
   // --- Player ---
-  const player = { x: TILE*5 + TILE/2, y: (heightMap[5] - 2)*TILE, w:22, h:28, vx:0, vy:0, onGround:false, facing:1 };
+  const player = { x: TILE*5 + TILE/2, y: TILE*10, w:22, h:28, vx:0, vy:0, onGround:false, facing:1 };
 
   // --- Physics params ---
   const GRAVITY = 1400; const MAX_FALL = 1400; const MAX_SPEED = 220; const GROUND_ACCEL = 14000; const AIR_ACCEL = 3200; const JUMP_SPEED = 520; const JUMP_CUTOFF = 200; const COYOTE_TIME = 0.10; const JUMP_BUFFER = 0.10;
@@ -94,92 +148,97 @@
   const camera = { x:0, y:0, scale:1, targetScale:1 };
   const allowedScales = [0.5, 1, 2, 3, 4];
   function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-
-  // zoom snapping: wait a short time after wheel events then snap target to nearest allowed scale
-  let snapTimer = null;
-  function scheduleSnap(){ if(snapTimer) clearTimeout(snapTimer); snapTimer = setTimeout(() => { // snap now
-      // find nearest allowed scale to current targetScale
-      let nearest = allowedScales[0]; let bestd = Math.abs(camera.targetScale - nearest);
-      for(const s of allowedScales){ const d = Math.abs(camera.targetScale - s); if(d < bestd){ bestd = d; nearest = s; } }
-      // preserve world point under cursor when snapping
-      const rect = canvas.getBoundingClientRect(); const mx = lastMouse.x - rect.left, my = lastMouse.y - rect.top;
-      const worldBeforeX = camera.x + mx / camera.targetScale; const worldBeforeY = camera.y + my / camera.targetScale;
-      camera.targetScale = nearest;
-      const worldAfterX = camera.x + mx / camera.targetScale; const worldAfterY = camera.y + my / camera.targetScale;
-      camera.x += (worldAfterX - worldBeforeX); camera.y += (worldAfterY - worldBeforeY);
-      snapTimer = null;
-    }, 180); }
-
-  // track last mouse position for snap centering
-  const lastMouse = {x: canvas.width/2, y: canvas.height/2};
-  window.addEventListener('mousemove', e => { lastMouse.x = e.clientX; lastMouse.y = e.clientY; });
-
-  window.addEventListener('wheel', (e) => {
-    const prevTarget = camera.targetScale;
-    const zoomFactor = Math.pow(1.0018, -e.deltaY);
-    let newTarget = clamp(camera.targetScale * zoomFactor, allowedScales[0], allowedScales[allowedScales.length-1]);
-    // keep world point under cursor stable immediately
-    const rect = canvas.getBoundingClientRect(); const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-    const worldBeforeX = camera.x + sx / camera.targetScale; const worldBeforeY = camera.y + sy / camera.targetScale;
-    camera.targetScale = newTarget;
-    const worldAfterX = camera.x + sx / camera.targetScale; const worldAfterY = camera.y + sy / camera.targetScale;
-    camera.x += (worldAfterX - worldBeforeX); camera.y += (worldAfterY - worldBeforeY);
-    scheduleSnap();
-  }, {passive:true});
-
-  // double-click reset
+  let snapTimer = null; const lastMouse = {x: canvas.width/2, y: canvas.height/2}; window.addEventListener('mousemove', e => { lastMouse.x = e.clientX; lastMouse.y = e.clientY; });
+  function scheduleSnap(){ if(snapTimer) clearTimeout(snapTimer); snapTimer = setTimeout(() => { let nearest = allowedScales[0]; let bestd = Math.abs(camera.targetScale - nearest); for(const s of allowedScales){ const d = Math.abs(camera.targetScale - s); if(d < bestd){ bestd = d; nearest = s; } } const rect = canvas.getBoundingClientRect(); const mx = lastMouse.x - rect.left, my = lastMouse.y - rect.top; const worldBeforeX = camera.x + mx / camera.targetScale; const worldBeforeY = camera.y + my / camera.targetScale; camera.targetScale = nearest; const worldAfterX = camera.x + mx / camera.targetScale; const worldAfterY = camera.y + my / camera.targetScale; camera.x += (worldAfterX - worldBeforeX); camera.y += (worldAfterY - worldBeforeY); snapTimer = null; }, 180); }
+  window.addEventListener('wheel', (e) => { const zoomFactor = Math.pow(1.0018, -e.deltaY); let newTarget = clamp(camera.targetScale * zoomFactor, allowedScales[0], allowedScales[allowedScales.length-1]); const rect = canvas.getBoundingClientRect(); const sx = e.clientX - rect.left, sy = e.clientY - rect.top; const worldBeforeX = camera.x + sx / camera.targetScale; const worldBeforeY = camera.y + sy / camera.targetScale; camera.targetScale = newTarget; const worldAfterX = camera.x + sx / camera.targetScale; const worldAfterY = camera.y + sy / camera.targetScale; camera.x += (worldAfterX - worldBeforeX); camera.y += (worldAfterY - worldBeforeY); scheduleSnap(); }, {passive:true});
   canvas.addEventListener('dblclick', () => { camera.targetScale = 1.0; });
 
   // --- Particle system (foot dust) ---
   const particles = [];
-  function spawnFootParticles(){
-    // spawn a few small particles near player's feet
-    const footX = player.x + (player.facing === 1 ? player.w*0.18 : -player.w*0.18);
-    const footY = player.y + player.h/2 - 4;
-    const count = Math.random() < 0.5 ? 1 : 2;
-    for(let i=0;i<count;i++){
-      particles.push({ x: footX + (Math.random()-0.5)*8, y: footY + (Math.random()-0.5)*4, vx: (Math.random()-0.5)*80 + player.vx*0.15, vy: -Math.random()*120 - 20, life: 0.45 + Math.random()*0.25, age: 0, size: 2 + Math.random()*2 });
-      // limit particles array to avoid runaway
-      if(particles.length > 200) particles.shift();
+  function spawnFootParticles(){ const footX = player.x + (player.facing === 1 ? player.w*0.18 : -player.w*0.18); const footY = player.y + player.h/2 - 4; const count = Math.random() < 0.5 ? 1 : 2; for(let i=0;i<count;i++){ particles.push({ x: footX + (Math.random()-0.5)*8, y: footY + (Math.random()-0.5)*4, vx: (Math.random()-0.5)*80 + player.vx*0.15, vy: -Math.random()*120 - 20, life: 0.45 + Math.random()*0.25, age: 0, size: 2 + Math.random()*2 }); if(particles.length > 300) particles.shift(); } }
+
+  // --- Clouds for parallax sky ---
+  const clouds = [];
+  function makeClouds(){
+    for(let i=0;i<24;i++){
+      clouds.push({ x: Math.random() * WORLD_W * TILE, y: 40 + Math.random()*160, scale: 0.6 + Math.random()*1.2, speed: 6 + Math.random()*18, alpha: 0.6 + Math.random()*0.35 });
     }
   }
+  makeClouds();
 
   // --- Movement helpers ---
   function moveToward(v, target, maxDelta){ if(v < target) return Math.min(v + maxDelta, target); if(v > target) return Math.max(v - maxDelta, target); return v; }
 
   // --- Game loop & physics ---
-  let last = performance.now(); let acc = 0; const STEP = 1/60; window.dt = STEP; let frames = 0, fps = 0, fpsTimer = 0;
-  let footParticleCooldown = 0;
+  let last = performance.now(); let acc = 0; const STEP = 1/60; window.dt = STEP; let frames = 0, fps = 0, fpsTimer = 0; let footParticleCooldown = 0;
 
   function physicsStep(){
-    // horizontal
     let target = 0; if(input.left) target -= MAX_SPEED; if(input.right) target += MAX_SPEED; const accel = player.onGround ? GROUND_ACCEL : AIR_ACCEL; player.vx = moveToward(player.vx, target, accel * STEP);
-    // gravity
     player.vy += GRAVITY * STEP; if(player.vy > MAX_FALL) player.vy = MAX_FALL;
-    // timers
     coyoteTimer -= STEP; if(player.onGround) coyoteTimer = COYOTE_TIME; if(jumpBufferTimer > 0) jumpBufferTimer -= STEP;
-    // jumping
     if(jumpBufferTimer > 0 && coyoteTimer > 0){ player.vy = -JUMP_SPEED; player.onGround = false; coyoteTimer = 0; jumpBufferTimer = 0; }
     if(!input.jumpHeld && player.vy < 0){ if(player.vy < -JUMP_CUTOFF) player.vy = -JUMP_CUTOFF; }
-    // spawn foot particles when walking on ground
-    footParticleCooldown -= STEP;
-    if(player.onGround && Math.abs(player.vx) > 40){ if(footParticleCooldown <= 0){ spawnFootParticles(); footParticleCooldown = 0.06; } }
-
-    // update particles physics
+    footParticleCooldown -= STEP; if(player.onGround && Math.abs(player.vx) > 40){ if(footParticleCooldown <= 0){ spawnFootParticles(); footParticleCooldown = 0.06; } }
     for(let i=particles.length-1;i>=0;i--){ const p = particles[i]; p.vy += GRAVITY * 0.5 * STEP; p.x += p.vx * STEP; p.y += p.vy * STEP; p.age += STEP; if(p.age >= p.life) particles.splice(i,1); }
-
-    // collision
     const res = resolveCollision(player.x, player.y, player.w, player.h, player.vx, player.vy, STEP);
-    player.x = res.x; player.y = res.y; player.vx = res.vx; player.vy = res.vy; player.onGround = res.onGround;
-    if(player.vx < -1) player.facing = -1; if(player.vx > 1) player.facing = 1;
+    player.x = res.x; player.y = res.y; player.vx = res.vx; player.vy = res.vy; player.onGround = res.onGround; if(player.vx < -1) player.facing = -1; if(player.vx > 1) player.facing = 1;
+  }
+
+  // sky color helper (lerp function)
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function lerpColor(c1, c2, t){ return `rgb(${Math.round(lerp(c1[0],c2[0],t))},${Math.round(lerp(c1[1],c2[1],t))},${Math.round(lerp(c1[2],c2[2],t))})`; }
+
+  function drawSky(){
+    // sky changes based on player's X position across world
+    const t = clamp(player.x / (WORLD_W * TILE), 0, 1);
+    // morning -> noon -> dusk gradient colors
+    const topColor = t < 0.5 ? lerpColor([120,190,255],[90,160,255], t*2) : lerpColor([90,160,255],[20,40,90], (t-0.5)*2);
+    const bottomColor = t < 0.5 ? lerpColor([200,230,255],[140,205,255], t*2) : lerpColor([140,205,255],[60,90,140], (t-0.5)*2);
+    const g = ctx.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0, topColor); g.addColorStop(1, bottomColor);
+    ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // sun position — arc across the sky based on t
+    const sunX = (t * 1.1 - 0.05) * canvas.width; // allow a bit beyond edges
+    const sunArc = Math.sin(t * Math.PI); // 0 at edges, 1 at middle
+    const sunY = canvas.height * 0.18 - sunArc * (canvas.height * 0.12);
+    const sunRadius = 36 + sunArc * 14;
+    // halo
+    const sunGrad = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunRadius*4);
+    sunGrad.addColorStop(0, 'rgba(255,245,200,0.9)');
+    sunGrad.addColorStop(0.2, 'rgba(255,220,120,0.35)');
+    sunGrad.addColorStop(1, 'rgba(255,200,120,0)');
+    ctx.fillStyle = sunGrad; ctx.beginPath(); ctx.arc(sunX, sunY, sunRadius*4, 0, Math.PI*2); ctx.fill();
+    // core
+    ctx.fillStyle = 'rgba(255,248,210,1)'; ctx.beginPath(); ctx.arc(sunX, sunY, sunRadius, 0, Math.PI*2); ctx.fill();
+
+    // parallax clouds (drawn in screen space but influenced by camera/player for parallax)
+    for(const c of clouds){
+      // cloud screen X uses parallax factor (clouds move slower than world)
+      const parallax = 0.35 + 0.45 * (1 - c.scale); // smaller clouds move slightly faster
+      const cx = ((c.x - camera.x * parallax) % (WORLD_W * TILE + 800)) - 400;
+      const cy = c.y + Math.sin((c.x + performance.now()*0.0002*c.speed) * 0.001) * 6;
+      ctx.globalAlpha = c.alpha * 0.95;
+      drawCloud(cx, cy, c.scale);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawCloud(x,y,s){
+    ctx.save(); ctx.translate(x,y); ctx.scale(s,s);
+    // simple multi-ellipse cloud
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.beginPath(); ctx.ellipse(0,0,46,22,0,0,Math.PI*2); ctx.ellipse(-34,4,28,16,0,0,Math.PI*2); ctx.ellipse(34,4,28,16,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
   }
 
   function draw(){
-    ctx.save(); ctx.imageSmoothingEnabled = false; ctx.clearRect(0,0,canvas.width,canvas.height);
-    // apply scale and camera translation
-    ctx.scale(camera.scale, camera.scale);
-    // use Math.floor for camera pos to help pixel crispness when scale is integer
-    ctx.translate(-Math.floor(camera.x), -Math.floor(camera.y));
+    // draw sky in screen-space (not scaled by camera) to keep 2.5D effect crisp
+    ctx.save(); ctx.fillStyle = '#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    drawSky(); ctx.restore();
+
+    // world rendering transformed by camera
+    ctx.save(); ctx.imageSmoothingEnabled = false; ctx.scale(camera.scale, camera.scale); ctx.translate(-Math.floor(camera.x), -Math.floor(camera.y));
 
     // visible tiles
     const viewW = canvas.width / camera.scale; const viewH = canvas.height / camera.scale;
@@ -208,30 +267,34 @@
     ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.strokeRect(px, py, player.w, player.h);
 
     ctx.restore();
+
     hud.innerHTML = `x:${Math.round(player.x)} y:${Math.round(player.y)} vx:${Math.round(player.vx)} vy:${Math.round(player.vy)} fps:${Math.round(fps)} zoom:${camera.scale.toFixed(2)}`;
   }
 
   function updateCamera(){
     const targetX = player.x - (canvas.width / (2 * camera.scale)); const targetY = player.y - (canvas.height / (2 * camera.scale));
-    camera.x += (targetX - camera.x) * 0.12; camera.y += (targetY - camera.y) * 0.12;
-    // smooth scale toward targetScale but snap to allowed scales when close
-    camera.scale += (camera.targetScale - camera.scale) * 0.12;
-    // if very close to targetScale, snap precisely (helps keep integer scale exact)
-    if(Math.abs(camera.scale - camera.targetScale) < 0.001) camera.scale = camera.targetScale;
-    // clamp camera bounds
-    camera.x = clamp(camera.x, 0, WORLD_W * TILE - canvas.width / camera.scale);
-    camera.y = clamp(camera.y, 0, WORLD_H * TILE - canvas.height / camera.scale);
+    camera.x += (targetX - camera.x) * 0.12; camera.y += (targetY - camera.y) * 0.12; camera.scale += (camera.targetScale - camera.scale) * 0.12; if(Math.abs(camera.scale - camera.targetScale) < 0.001) camera.scale = camera.targetScale; camera.x = clamp(camera.x, 0, WORLD_W * TILE - canvas.width / camera.scale); camera.y = clamp(camera.y, 0, WORLD_H * TILE - canvas.height / camera.scale);
   }
 
-  function frame(now){
-    const dt_real = (now - last) / 1000; last = now; acc += dt_real; if(acc > 0.25) acc = 0.25; while(acc >= STEP){ physicsStep(); acc -= STEP; } updateCamera(); draw(); frames++; fpsTimer += dt_real; if(fpsTimer >= 0.5){ fps = frames / fpsTimer; frames = 0; fpsTimer = 0; } requestAnimationFrame(frame);
+  async function main(){
+    await generateTerrain();
+    // set player's initial Y based on generated heightmap
+    player.y = (heightMap[5] - 2) * TILE;
+    // start loop
+    last = performance.now(); requestAnimationFrame(frame);
   }
 
-  last = performance.now(); requestAnimationFrame(frame);
+  function frame(now){ const dt_real = (now - last) / 1000; last = now; acc += dt_real; if(acc > 0.25) acc = 0.25; while(acc >= STEP){ physicsStep(); acc -= STEP; } updateCamera(); draw(); frames++; fpsTimer += dt_real; if(fpsTimer >= 0.5){ fps = frames / fpsTimer; frames = 0; fpsTimer = 0; } requestAnimationFrame(frame); }
 
-  // focus canvas
+  // initialize clouds movement seed
+  last = performance.now();
+
+  // focus canvas on click
   canvas.tabIndex = 1000; canvas.style.outline = 'none'; canvas.addEventListener('click', () => canvas.focus());
-  hud.innerHTML = 'Ready — Click canvas to focus. Controls: ←/A, →/D, Space to jump, wheel to zoom (snaps to pixel scales)';
+  hud.innerHTML = 'Loading world...';
+
+  // start main
+  main();
 
 })();
 </script>
